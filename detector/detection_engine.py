@@ -4,7 +4,8 @@ from rules import (
     check_task_mismatch,
     check_sensitive_access,
     check_unexpected_tool,
-    check_cross_system_movement
+    check_cross_system_movement,
+    check_untrusted_to_sensitive_transition
 )
 
 from scoring import (
@@ -14,23 +15,7 @@ from scoring import (
 
 
 def analyze_events(events):
-    """
-    Analyze a sequence of AI-agent activity events.
 
-    Input:
-        List of event dictionaries.
-
-    Output:
-        Detection result containing:
-        - agent ID
-        - task
-        - risk level
-        - risk score
-        - reasons
-        - attack chain
-    """
-
-    # Handle empty input
     if not events:
         return {
             "agent_id": None,
@@ -41,16 +26,15 @@ def analyze_events(events):
             "attack_chain": []
         }
 
-    # Detection flags
     task_mismatch = False
     unexpected_tool = False
     sensitive_access = False
 
     reasons = []
 
-    # --------------------------------------------------
+    # -----------------------------------------
     # Analyze individual events
-    # --------------------------------------------------
+    # -----------------------------------------
 
     for event in events:
 
@@ -63,15 +47,19 @@ def analyze_events(events):
         if check_sensitive_access(event):
             sensitive_access = True
 
-    # --------------------------------------------------
-    # Analyze the complete sequence
-    # --------------------------------------------------
+    # -----------------------------------------
+    # Analyze sequence
+    # -----------------------------------------
 
     cross_system_movement = check_cross_system_movement(events)
 
-    # --------------------------------------------------
-    # Build detection reasons
-    # --------------------------------------------------
+    untrusted_to_sensitive = check_untrusted_to_sensitive_transition(
+        events
+    )
+
+    # -----------------------------------------
+    # Build reasons
+    # -----------------------------------------
 
     if task_mismatch:
         reasons.append("TASK_MISMATCH")
@@ -85,22 +73,26 @@ def analyze_events(events):
     if cross_system_movement:
         reasons.append("CROSS_SYSTEM_MOVEMENT")
 
-    # --------------------------------------------------
-    # Calculate risk
-    # --------------------------------------------------
+    if untrusted_to_sensitive:
+        reasons.append("UNTRUSTED_TO_SENSITIVE_TRANSITION")
+
+    # -----------------------------------------
+    # Calculate score
+    # -----------------------------------------
 
     risk_score = calculate_risk_score(
         task_mismatch=task_mismatch,
         unexpected_tool=unexpected_tool,
         sensitive_access=sensitive_access,
-        cross_system_movement=cross_system_movement
+        cross_system_movement=cross_system_movement,
+        untrusted_to_sensitive=untrusted_to_sensitive
     )
 
     risk_level = get_risk_level(risk_score)
 
-    # --------------------------------------------------
+    # -----------------------------------------
     # Build attack chain
-    # --------------------------------------------------
+    # -----------------------------------------
 
     attack_chain = []
 
@@ -111,9 +103,9 @@ def analyze_events(events):
         if tool and tool not in attack_chain:
             attack_chain.append(tool)
 
-    # --------------------------------------------------
-    # Final detection result
-    # --------------------------------------------------
+    # -----------------------------------------
+    # Final result
+    # -----------------------------------------
 
     return {
         "agent_id": events[0].get("agent_id"),
@@ -125,39 +117,57 @@ def analyze_events(events):
     }
 
 
-# ======================================================
-# TESTING
-# ======================================================
+# =====================================================
+# TEST
+# =====================================================
 
 if __name__ == "__main__":
 
-    # Simulated suspicious agent activity
     test_events = [
 
-    {
-        "event_id": "evt_001",
-        "agent_id": "research-agent-01",
-        "task": "summarize_email",
-        "tool": "email",
-        "action": "read",
-        "target": "inbox",
-        "source": "user"
-    },
+        {
+            "event_id": "evt_001",
+            "agent_id": "research-agent-01",
+            "task": "summarize_email",
+            "tool": "email",
+            "action": "read",
+            "target": "inbox",
+            "source": "user"
+        },
 
-    {
-        "event_id": "evt_002",
-        "agent_id": "research-agent-01",
-        "task": "summarize_email",
-        "tool": "drive",
-        "action": "read",
-        "target": "project_document",
-        "source": "email"
-    }
-]
-    # Run detector
+        {
+            "event_id": "evt_002",
+            "agent_id": "research-agent-01",
+            "task": "summarize_email",
+            "tool": "drive",
+            "action": "read",
+            "target": "project_document",
+            "source": "external_document"
+        },
+
+        {
+            "event_id": "evt_003",
+            "agent_id": "research-agent-01",
+            "task": "summarize_email",
+            "tool": "github",
+            "action": "read_repository",
+            "target": "private_repository",
+            "source": "external_document"
+        },
+
+        {
+            "event_id": "evt_004",
+            "agent_id": "research-agent-01",
+            "task": "summarize_email",
+            "tool": "database",
+            "action": "query",
+            "target": "database",
+            "source": "github"
+        }
+    ]
+
     result = analyze_events(test_events)
 
-    # Display result
     print("\n===== AgentTrace Detection Result =====\n")
 
     print("Agent ID:")

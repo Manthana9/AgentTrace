@@ -1,6 +1,5 @@
 # detector/rules.py
 
-# Tools that are normally allowed for each task.
 EXPECTED_TOOLS = {
     "summarize_email": {
         "email",
@@ -8,7 +7,6 @@ EXPECTED_TOOLS = {
     }
 }
 
-# Resources that should be treated as sensitive.
 SENSITIVE_TARGETS = {
     "credentials",
     "secrets",
@@ -17,13 +15,23 @@ SENSITIVE_TARGETS = {
     "internal_api"
 }
 
+UNTRUSTED_SOURCES = {
+    "external_document",
+    "external_email",
+    "webpage",
+    "external_url",
+    "unknown"
+}
+
+SENSITIVE_TOOLS = {
+    "github",
+    "database",
+    "internal_api",
+    "credential_store"
+}
+
 
 def check_task_mismatch(event):
-    """
-    Checks whether the agent is using a tool
-    that does not normally belong to its assigned task.
-    """
-
     task = event.get("task")
     tool = event.get("tool")
 
@@ -36,11 +44,6 @@ def check_task_mismatch(event):
 
 
 def check_unexpected_tool(event):
-    """
-    Checks whether the current tool is unexpected
-    for the agent's assigned task.
-    """
-
     task = event.get("task")
     tool = event.get("tool")
 
@@ -53,10 +56,6 @@ def check_unexpected_tool(event):
 
 
 def check_sensitive_access(event):
-    """
-    Checks whether the agent accessed a sensitive resource.
-    """
-
     target = event.get("target")
 
     return target in SENSITIVE_TARGETS
@@ -64,14 +63,7 @@ def check_sensitive_access(event):
 
 def check_cross_system_movement(events):
     """
-    Detects movement across multiple systems/tools
-    during the same agent task.
-
-    Example:
-    email -> drive -> github -> database
-
-    Three or more different systems are considered
-    suspicious in this prototype.
+    Detect movement across multiple systems.
     """
 
     tools = []
@@ -83,3 +75,33 @@ def check_cross_system_movement(events):
             tools.append(tool)
 
     return len(tools) >= 3
+
+
+def check_untrusted_to_sensitive_transition(events):
+    """
+    Detects when the agent processes untrusted external
+    content and subsequently accesses a sensitive system.
+    """
+
+    untrusted_seen = False
+
+    for event in events:
+
+        source = event.get("source")
+        tool = event.get("tool")
+        target = event.get("target")
+
+        # Step 1: untrusted content enters the agent workflow
+        if source in UNTRUSTED_SOURCES:
+            untrusted_seen = True
+
+        # Step 2: agent subsequently accesses a sensitive system
+        if untrusted_seen:
+
+            if (
+                tool in SENSITIVE_TOOLS
+                or target in SENSITIVE_TARGETS
+            ):
+                return True
+
+    return False
