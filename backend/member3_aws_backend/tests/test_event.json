@@ -1,0 +1,9 @@
+{
+  "agent_id": "research-agent-01",
+  "timestamp": "2026-09-19T12:00:00Z",
+  "task": "summarize_email",
+  "tool": "email",
+  "action": "read_email",
+  "target": "project-inbox",
+  "source": "user_task"
+}
