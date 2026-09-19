@@ -28,7 +28,7 @@ class AnalyzeRequest(BaseModel):
 
 
 # Temporary in-memory event store.
-# Later we can replace this with DynamoDB.
+# Later this will be replaced with DynamoDB.
 event_history = {}
 
 
@@ -68,9 +68,39 @@ def receive_event(event: Event):
 
     result = analyze_events(events)
 
+    is_suspicious = result.get("risk_level") in {
+        "MEDIUM",
+        "HIGH"
+    }
+
     return {
         "event_received": True,
         "event_id": event.event_id,
         "agent_id": agent_id,
-        "detection": result
+        "detection": result,
+        "incident": {
+            "status": "SUSPICIOUS" if is_suspicious else "NORMAL",
+            "agent_id": agent_id,
+            "risk_level": result.get("risk_level"),
+            "risk_score": result.get("risk_score"),
+            "attack_chain": result.get("attack_chain", []),
+            "reasons": result.get("reasons", []),
+            "evidence": result.get("evidence", [])
+        }
+    }
+
+
+@app.post("/reset/{agent_id}")
+def reset_agent(agent_id: str):
+    """
+    Clear the temporary event history for an agent.
+
+    Used to start a fresh detection scenario.
+    """
+
+    event_history.pop(agent_id, None)
+
+    return {
+        "agent_id": agent_id,
+        "status": "reset"
     }
