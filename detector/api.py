@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List
 
 from .detection_engine import analyze_events
 
@@ -27,6 +27,11 @@ class AnalyzeRequest(BaseModel):
     events: List[Event]
 
 
+# Temporary in-memory event store.
+# Later we can replace this with DynamoDB.
+event_history = {}
+
+
 @app.get("/")
 def root():
     return {
@@ -37,14 +42,35 @@ def root():
 
 @app.post("/analyze")
 def analyze(request: AnalyzeRequest):
+    events = [event.model_dump() for event in request.events]
 
-    # Convert Pydantic objects into dictionaries
-    events = [
-        event.model_dump()
-        for event in request.events
-    ]
-
-    # Send events to our detection engine
     result = analyze_events(events)
 
     return result
+
+
+@app.post("/event")
+def receive_event(event: Event):
+    """
+    Receive one agent event in real time,
+    store it temporarily, and analyze the
+    agent's activity history.
+    """
+
+    agent_id = event.agent_id
+
+    if agent_id not in event_history:
+        event_history[agent_id] = []
+
+    event_history[agent_id].append(event.model_dump())
+
+    events = event_history[agent_id]
+
+    result = analyze_events(events)
+
+    return {
+        "event_received": True,
+        "event_id": event.event_id,
+        "agent_id": agent_id,
+        "detection": result
+    }

@@ -5,7 +5,8 @@ from .rules import (
     check_sensitive_access,
     check_unexpected_tool,
     check_cross_system_movement,
-    check_untrusted_to_sensitive_transition
+    check_untrusted_to_sensitive_transition,
+    check_task_change
 )
 
 from .scoring import (
@@ -13,13 +14,37 @@ from .scoring import (
     get_risk_level
 )
 
+
 def build_evidence(events):
-    """
-    Build human-readable evidence explaining
-    why the detector generated an alert.
-    """
 
     evidence = []
+
+    # ------------------------------------------------
+    # Task change
+    # ------------------------------------------------
+
+    tasks = []
+
+    for event in events:
+
+        task = event.get("task")
+
+        if task and task not in tasks:
+            tasks.append(task)
+
+    if len(tasks) > 1:
+
+        evidence.append({
+            "type": "TASK_CHANGE",
+            "description": (
+                f"Agent task changed from "
+                f"'{tasks[0]}' to '{tasks[-1]}'."
+            )
+        })
+
+    # ------------------------------------------------
+    # Individual event evidence
+    # ------------------------------------------------
 
     for event in events:
 
@@ -30,19 +55,17 @@ def build_evidence(events):
         target = event.get("target")
         source = event.get("source")
 
-        # Task mismatch evidence
         if check_task_mismatch(event):
 
             evidence.append({
                 "type": "TASK_MISMATCH",
                 "event_id": event_id,
                 "description": (
-                    f"Task '{task}' used unexpected tool "
-                    f"'{tool}'."
+                    f"Task '{task}' used unexpected "
+                    f"tool '{tool}'."
                 )
             })
 
-        # Sensitive resource evidence
         if check_sensitive_access(event):
 
             evidence.append({
@@ -50,15 +73,14 @@ def build_evidence(events):
                 "event_id": event_id,
                 "description": (
                     f"Agent performed '{action}' using "
-                    f"'{tool}' against sensitive target "
-                    f"'{target}'."
+                    f"'{tool}' against '{target}'."
                 )
             })
 
-        # Untrusted source evidence
         if source in {
             "external_document",
             "external_email",
+            "external_share",
             "webpage",
             "external_url",
             "unknown"
@@ -68,10 +90,24 @@ def build_evidence(events):
                 "type": "UNTRUSTED_SOURCE",
                 "event_id": event_id,
                 "description": (
-                    f"Activity originated from untrusted "
-                    f"source '{source}'."
+                    f"Activity originated from "
+                    f"untrusted source '{source}'."
                 )
             })
+
+    # ------------------------------------------------
+    # Untrusted → sensitive transition
+    # ------------------------------------------------
+
+    if check_untrusted_to_sensitive_transition(events):
+
+        evidence.append({
+            "type": "UNTRUSTED_TO_SENSITIVE_TRANSITION",
+            "description": (
+                "Agent processed untrusted content "
+                "before accessing a sensitive system."
+            )
+        })
 
     return evidence
 
@@ -79,6 +115,7 @@ def build_evidence(events):
 def analyze_events(events):
 
     if not events:
+
         return {
             "agent_id": None,
             "task": None,
@@ -95,9 +132,9 @@ def analyze_events(events):
 
     reasons = []
 
-    # -----------------------------------------
-    # Analyze individual events
-    # -----------------------------------------
+    # ------------------------------------------------
+    # Individual event analysis
+    # ------------------------------------------------
 
     for event in events:
 
@@ -110,21 +147,23 @@ def analyze_events(events):
         if check_sensitive_access(event):
             sensitive_access = True
 
-    # -----------------------------------------
-    # Analyze sequence
-    # -----------------------------------------
+    # ------------------------------------------------
+    # Sequence analysis
+    # ------------------------------------------------
 
-    cross_system_movement = check_cross_system_movement(
-        events
+    cross_system_movement = (
+        check_cross_system_movement(events)
     )
 
     untrusted_to_sensitive = (
         check_untrusted_to_sensitive_transition(events)
     )
 
-    # -----------------------------------------
-    # Build reasons
-    # -----------------------------------------
+    task_changed = check_task_change(events)
+
+    # ------------------------------------------------
+    # Reasons
+    # ------------------------------------------------
 
     if task_mismatch:
         reasons.append("TASK_MISMATCH")
@@ -143,23 +182,27 @@ def analyze_events(events):
             "UNTRUSTED_TO_SENSITIVE_TRANSITION"
         )
 
-    # -----------------------------------------
-    # Calculate score
-    # -----------------------------------------
+    if task_changed:
+        reasons.append("TASK_CHANGED")
+
+    # ------------------------------------------------
+    # Score
+    # ------------------------------------------------
 
     risk_score = calculate_risk_score(
         task_mismatch=task_mismatch,
         unexpected_tool=unexpected_tool,
         sensitive_access=sensitive_access,
         cross_system_movement=cross_system_movement,
-        untrusted_to_sensitive=untrusted_to_sensitive
+        untrusted_to_sensitive=untrusted_to_sensitive,
+        task_changed=task_changed
     )
 
     risk_level = get_risk_level(risk_score)
 
-    # -----------------------------------------
-    # Build attack chain
-    # -----------------------------------------
+    # ------------------------------------------------
+    # Attack chain
+    # ------------------------------------------------
 
     attack_chain = []
 
@@ -170,15 +213,15 @@ def analyze_events(events):
         if tool and tool not in attack_chain:
             attack_chain.append(tool)
 
-    # -----------------------------------------
-    # Build evidence
-    # -----------------------------------------
+    # ------------------------------------------------
+    # Evidence
+    # ------------------------------------------------
 
     evidence = build_evidence(events)
 
-    # -----------------------------------------
+    # ------------------------------------------------
     # Final result
-    # -----------------------------------------
+    # ------------------------------------------------
 
     return {
         "agent_id": events[0].get("agent_id"),
@@ -189,89 +232,3 @@ def analyze_events(events):
         "attack_chain": attack_chain,
         "evidence": evidence
     }
-
-
-# =====================================================
-# TEST
-# =====================================================
-
-if __name__ == "__main__":
-
-    test_events = [
-
-        {
-            "event_id": "evt_001",
-            "agent_id": "research-agent-01",
-            "task": "summarize_email",
-            "tool": "email",
-            "action": "read",
-            "target": "inbox",
-            "source": "user"
-        },
-
-        {
-            "event_id": "evt_002",
-            "agent_id": "research-agent-01",
-            "task": "summarize_email",
-            "tool": "drive",
-            "action": "read",
-            "target": "project_document",
-            "source": "external_document"
-        },
-
-        {
-            "event_id": "evt_003",
-            "agent_id": "research-agent-01",
-            "task": "summarize_email",
-            "tool": "github",
-            "action": "read_repository",
-            "target": "private_repository",
-            "source": "external_document"
-        },
-
-        {
-            "event_id": "evt_004",
-            "agent_id": "research-agent-01",
-            "task": "summarize_email",
-            "tool": "database",
-            "action": "query",
-            "target": "database",
-            "source": "github"
-        }
-    ]
-
-    result = analyze_events(test_events)
-
-    print("\n===== AgentTrace Detection Result =====\n")
-
-    print("Agent ID:")
-    print(result["agent_id"])
-
-    print("\nTask:")
-    print(result["task"])
-
-    print("\nRisk Level:")
-    print(result["risk_level"])
-
-    print("\nRisk Score:")
-    print(result["risk_score"])
-
-    print("\nReasons:")
-
-    for reason in result["reasons"]:
-        print("-", reason)
-
-    print("\nAttack Chain:")
-
-    print(" -> ".join(result["attack_chain"]))
-
-    print("\nEvidence:")
-
-    for item in result["evidence"]:
-        print(
-            f"- [{item['type']}] "
-            f"{item['event_id']}: "
-            f"{item['description']}"
-        )
-
-    print("\n========================================\n")

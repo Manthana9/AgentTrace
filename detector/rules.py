@@ -2,8 +2,8 @@
 
 EXPECTED_TOOLS = {
     "summarize_email": {
-        "email",
-        "drive"
+        "email_tool",
+        "drive_tool"
     }
 }
 
@@ -11,23 +11,26 @@ SENSITIVE_TARGETS = {
     "credentials",
     "secrets",
     "database",
+    "users_table",
     "private_repository",
+    "org-repos",
     "internal_api"
+}
+
+SENSITIVE_TOOLS = {
+    "github_tool",
+    "database_tool",
+    "internal_api_tool",
+    "credential_store"
 }
 
 UNTRUSTED_SOURCES = {
     "external_document",
     "external_email",
+    "external_share",
     "webpage",
     "external_url",
     "unknown"
-}
-
-SENSITIVE_TOOLS = {
-    "github",
-    "database",
-    "internal_api",
-    "credential_store"
 }
 
 
@@ -62,10 +65,6 @@ def check_sensitive_access(event):
 
 
 def check_cross_system_movement(events):
-    """
-    Detect movement across multiple systems.
-    """
-
     tools = []
 
     for event in events:
@@ -79,8 +78,8 @@ def check_cross_system_movement(events):
 
 def check_untrusted_to_sensitive_transition(events):
     """
-    Detects when the agent processes untrusted external
-    content and subsequently accesses a sensitive system.
+    Detect untrusted content followed by
+    access to a sensitive tool or target.
     """
 
     untrusted_seen = False
@@ -91,11 +90,9 @@ def check_untrusted_to_sensitive_transition(events):
         tool = event.get("tool")
         target = event.get("target")
 
-        # Step 1: untrusted content enters the agent workflow
         if source in UNTRUSTED_SOURCES:
             untrusted_seen = True
 
-        # Step 2: agent subsequently accesses a sensitive system
         if untrusted_seen:
 
             if (
@@ -105,3 +102,21 @@ def check_untrusted_to_sensitive_transition(events):
                 return True
 
     return False
+
+
+def check_task_change(events):
+    """
+    Detect when the agent's task changes during
+    a single activity sequence.
+    """
+
+    tasks = []
+
+    for event in events:
+
+        task = event.get("task")
+
+        if task and task not in tasks:
+            tasks.append(task)
+
+    return len(tasks) > 1
