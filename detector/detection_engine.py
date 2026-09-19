@@ -1,6 +1,6 @@
 # detector/detection_engine.py
 
-from rules import (
+from .rules import (
     check_task_mismatch,
     check_sensitive_access,
     check_unexpected_tool,
@@ -8,11 +8,10 @@ from rules import (
     check_untrusted_to_sensitive_transition
 )
 
-from scoring import (
+from .scoring import (
     calculate_risk_score,
     get_risk_level
 )
-
 
 def build_evidence(events):
     """
