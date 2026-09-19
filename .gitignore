@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.pyc
+.env
+events.jsonl
+events_fallback.jsonl
+test_events.jsonl
