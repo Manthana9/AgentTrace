@@ -14,6 +14,69 @@ from scoring import (
 )
 
 
+def build_evidence(events):
+    """
+    Build human-readable evidence explaining
+    why the detector generated an alert.
+    """
+
+    evidence = []
+
+    for event in events:
+
+        event_id = event.get("event_id")
+        task = event.get("task")
+        tool = event.get("tool")
+        action = event.get("action")
+        target = event.get("target")
+        source = event.get("source")
+
+        # Task mismatch evidence
+        if check_task_mismatch(event):
+
+            evidence.append({
+                "type": "TASK_MISMATCH",
+                "event_id": event_id,
+                "description": (
+                    f"Task '{task}' used unexpected tool "
+                    f"'{tool}'."
+                )
+            })
+
+        # Sensitive resource evidence
+        if check_sensitive_access(event):
+
+            evidence.append({
+                "type": "SENSITIVE_RESOURCE_ACCESS",
+                "event_id": event_id,
+                "description": (
+                    f"Agent performed '{action}' using "
+                    f"'{tool}' against sensitive target "
+                    f"'{target}'."
+                )
+            })
+
+        # Untrusted source evidence
+        if source in {
+            "external_document",
+            "external_email",
+            "webpage",
+            "external_url",
+            "unknown"
+        }:
+
+            evidence.append({
+                "type": "UNTRUSTED_SOURCE",
+                "event_id": event_id,
+                "description": (
+                    f"Activity originated from untrusted "
+                    f"source '{source}'."
+                )
+            })
+
+    return evidence
+
+
 def analyze_events(events):
 
     if not events:
@@ -23,7 +86,8 @@ def analyze_events(events):
             "risk_level": "NORMAL",
             "risk_score": 0,
             "reasons": [],
-            "attack_chain": []
+            "attack_chain": [],
+            "evidence": []
         }
 
     task_mismatch = False
@@ -51,10 +115,12 @@ def analyze_events(events):
     # Analyze sequence
     # -----------------------------------------
 
-    cross_system_movement = check_cross_system_movement(events)
-
-    untrusted_to_sensitive = check_untrusted_to_sensitive_transition(
+    cross_system_movement = check_cross_system_movement(
         events
+    )
+
+    untrusted_to_sensitive = (
+        check_untrusted_to_sensitive_transition(events)
     )
 
     # -----------------------------------------
@@ -74,7 +140,9 @@ def analyze_events(events):
         reasons.append("CROSS_SYSTEM_MOVEMENT")
 
     if untrusted_to_sensitive:
-        reasons.append("UNTRUSTED_TO_SENSITIVE_TRANSITION")
+        reasons.append(
+            "UNTRUSTED_TO_SENSITIVE_TRANSITION"
+        )
 
     # -----------------------------------------
     # Calculate score
@@ -104,6 +172,12 @@ def analyze_events(events):
             attack_chain.append(tool)
 
     # -----------------------------------------
+    # Build evidence
+    # -----------------------------------------
+
+    evidence = build_evidence(events)
+
+    # -----------------------------------------
     # Final result
     # -----------------------------------------
 
@@ -113,7 +187,8 @@ def analyze_events(events):
         "risk_level": risk_level,
         "risk_score": risk_score,
         "reasons": reasons,
-        "attack_chain": attack_chain
+        "attack_chain": attack_chain,
+        "evidence": evidence
     }
 
 
@@ -190,5 +265,14 @@ if __name__ == "__main__":
     print("\nAttack Chain:")
 
     print(" -> ".join(result["attack_chain"]))
+
+    print("\nEvidence:")
+
+    for item in result["evidence"]:
+        print(
+            f"- [{item['type']}] "
+            f"{item['event_id']}: "
+            f"{item['description']}"
+        )
 
     print("\n========================================\n")
