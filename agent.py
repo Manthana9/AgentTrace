@@ -1,8 +1,14 @@
 """
-Step 4: The "ResearchAgent" Brain
+AgentTrace - ResearchAgent
 
-Holds an ID + current task and exposes thin wrappers around the tools it's
-allowed to call, so scenario scripts read like a story.
+Represents the AI agent being monitored.
+
+The agent receives one legitimate user task and exposes
+thin wrappers around its available tools.
+
+AgentTrace does NOT change the task when suspicious behavior
+occurs. Instead, the detection engine observes whether the
+agent's tool usage deviates from the intended workflow.
 """
 
 import config
@@ -15,26 +21,126 @@ class ResearchAgent:
         self.task = None
 
     def set_task(self, task: str) -> None:
+        """
+        Set the legitimate task assigned to the agent.
+
+        The task remains unchanged during execution.
+        AgentTrace detects suspicious behavior from the
+        observed tool/action sequence.
+        """
         print(f"[{self.agent_id}] task set to: {task!r}")
         self.task = task
 
+    # ---------------------------------------------------------
+    # EMAIL
+    # ---------------------------------------------------------
+
     def fetch_email(self, target: str = "inbox") -> str:
-        return tools.email_tool(task=self.task, action="fetch", target=target)
+        """
+        Fetch email as part of the normal workflow.
+        """
+        return tools.email_tool(
+            task=self.task,
+            action="fetch",
+            target=target,
+            agent_id=self.agent_id,
+        )
 
     def send_email(self, target: str = "boss") -> str:
-        return tools.email_tool(task=self.task, action="send", target=target)
+        """
+        Send an email.
+        """
+        return tools.email_tool(
+            task=self.task,
+            action="send",
+            target=target,
+            agent_id=self.agent_id,
+        )
+
+    # ---------------------------------------------------------
+    # DRIVE
+    # ---------------------------------------------------------
 
     def read_drive_doc(self, target: str) -> str:
-        return tools.drive_tool(task=self.task, target=target)
+        """
+        Read a document from the drive.
+        """
+        return tools.drive_tool(
+            task=self.task,
+            target=target,
+            agent_id=self.agent_id,
+        )
+
+    # ---------------------------------------------------------
+    # GITHUB
+    # ---------------------------------------------------------
 
     def search_github(self, target: str = "org-repos") -> str:
-        return tools.github_tool(task=self.task, target=target)
+        """
+        Search repositories.
+
+        For the summarize_email task this is outside
+        the expected workflow and should be detected
+        by AgentTrace when it occurs.
+        """
+        return tools.github_tool(
+            task=self.task,
+            target=target,
+            agent_id=self.agent_id,
+        )
+
+    # ---------------------------------------------------------
+    # DATABASE
+    # ---------------------------------------------------------
 
     def query_database(self, target: str = "users_table") -> str:
-        return tools.database_tool(task=self.task, target=target)
+        """
+        Query a database.
+
+        This represents access to a sensitive system
+        that is not required for the email-summary task.
+        """
+        return tools.database_tool(
+            task=self.task,
+            target=target,
+            agent_id=self.agent_id,
+        )
+
+    # ---------------------------------------------------------
+    # INTERNAL API
+    # ---------------------------------------------------------
 
     def post_to_api(self, target: str, data: str) -> str:
-        return tools.internal_api_tool(task=self.task, target=target, data=data)
+        """
+        Send data to an internal API.
 
-    def read_spreadsheet(self, target: str = "shared_credentials_sheet") -> str:
-        return tools.spreadsheet_tool(task=self.task, target=target)
+        This can represent the final step in a suspicious
+        cross-system activity chain.
+        """
+        return tools.internal_api_tool(
+            task=self.task,
+            target=target,
+            data=data,
+            agent_id=self.agent_id,
+        )
+
+    # ---------------------------------------------------------
+    # SPREADSHEET
+    # ---------------------------------------------------------
+
+    def read_spreadsheet(
+        self,
+        target: str = "shared_credentials_sheet"
+    ) -> str:
+        """
+        Read a spreadsheet.
+
+        This tool is intentionally available to the agent
+        so the detection engine can identify inappropriate
+        access when it occurs.
+        """
+        return tools.spreadsheet_tool(
+            task=self.task,
+            target=target,
+            agent_id=self.agent_id,
+        )

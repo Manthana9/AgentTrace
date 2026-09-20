@@ -1,4 +1,21 @@
-# detector/detection_engine.py
+"""
+AgentTrace Detection Engine
+
+Analyzes sequences of AI-agent tool calls to identify behavioral
+deviation that may indicate Living-Off-the-Agent (LOTA) activity.
+
+Important design principle:
+The agent's legitimate task does NOT need to change.
+
+An attacker may manipulate the agent while it continues operating
+under the same task. AgentTrace therefore focuses on:
+
+    - unexpected tools
+    - sensitive resource access
+    - cross-system movement
+    - untrusted-to-sensitive transitions
+    - task/action mismatch
+"""
 
 from .rules import (
     check_task_mismatch,
@@ -6,45 +23,147 @@ from .rules import (
     check_unexpected_tool,
     check_cross_system_movement,
     check_untrusted_to_sensitive_transition,
-    check_task_change
 )
 
 from .scoring import (
     calculate_risk_score,
-    get_risk_level
+    get_risk_level,
 )
 
+
+# ============================================================
+# EXPECTED WORKFLOW
+# ============================================================
+
+EXPECTED_WORKFLOW = {
+    "summarize_email": [
+        "email_tool",
+        "drive_tool",
+    ]
+}
+
+
+# ============================================================
+# TOOL NORMALIZATION
+# ============================================================
+
+def _normalize_tool(tool):
+    """
+    Normalize tool names so the detector can understand both:
+
+        email_tool
+        email
+
+    This is useful because the local simulator and dashboard
+    may represent tools slightly differently.
+    """
+
+    if not tool:
+        return None
+
+    tool = str(tool).strip().lower()
+
+    aliases = {
+        "email": "email_tool",
+        "drive": "drive_tool",
+        "github": "github_tool",
+        "database": "database_tool",
+        "internal_api": "internal_api_tool",
+        "spreadsheet": "spreadsheet_tool",
+    }
+
+    return aliases.get(tool, tool)
+
+
+# ============================================================
+# EXPECTED TOOLS
+# ============================================================
+
+def _expected_tools_for_task(task):
+    """
+    Return the expected tools for a task.
+    """
+
+    tools = EXPECTED_WORKFLOW.get(task, [])
+
+    return {
+        _normalize_tool(tool)
+        for tool in tools
+    }
+
+
+# ============================================================
+# OBSERVED WORKFLOW
+# ============================================================
+
+def _build_attack_chain(events):
+    """
+    Build the ordered sequence of unique tools observed
+    during the agent execution.
+    """
+
+    attack_chain = []
+
+    for event in events:
+        tool = _normalize_tool(event.get("tool"))
+
+        if tool and tool not in attack_chain:
+            attack_chain.append(tool)
+
+    return attack_chain
+
+
+# ============================================================
+# BUILD EVIDENCE
+# ============================================================
 
 def build_evidence(events):
 
     evidence = []
 
-    # ------------------------------------------------
-    # Task change
-    # ------------------------------------------------
+    if not events:
+        return evidence
 
-    tasks = []
+    # --------------------------------------------------------
+    # Task information
+    # --------------------------------------------------------
+
+    task = events[0].get("task")
+
+    expected_tools = _expected_tools_for_task(task)
+
+    observed_tools = []
 
     for event in events:
+        tool = _normalize_tool(event.get("tool"))
 
-        task = event.get("task")
+        if tool and tool not in observed_tools:
+            observed_tools.append(tool)
 
-        if task and task not in tasks:
-            tasks.append(task)
+    # --------------------------------------------------------
+    # Expected vs observed workflow
+    # --------------------------------------------------------
 
-    if len(tasks) > 1:
+    unexpected_tools = [
+        tool
+        for tool in observed_tools
+        if tool not in expected_tools
+    ]
+
+    if unexpected_tools:
 
         evidence.append({
-            "type": "TASK_CHANGE",
+            "type": "BEHAVIOR_DEVIATION",
             "description": (
-                f"Agent task changed from "
-                f"'{tasks[0]}' to '{tasks[-1]}'."
-            )
+                f"Task '{task}' expected tools "
+                f"{sorted(expected_tools)}, but observed "
+                f"unexpected tools: {unexpected_tools}."
+            ),
         })
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
     # Individual event evidence
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
     for event in events:
 
@@ -55,6 +174,10 @@ def build_evidence(events):
         target = event.get("target")
         source = event.get("source")
 
+        # ----------------------------------------------------
+        # Task mismatch
+        # ----------------------------------------------------
+
         if check_task_mismatch(event):
 
             evidence.append({
@@ -63,8 +186,27 @@ def build_evidence(events):
                 "description": (
                     f"Task '{task}' used unexpected "
                     f"tool '{tool}'."
-                )
+                ),
             })
+
+        # ----------------------------------------------------
+        # Unexpected tool
+        # ----------------------------------------------------
+
+        if check_unexpected_tool(event):
+
+            evidence.append({
+                "type": "UNEXPECTED_TOOL",
+                "event_id": event_id,
+                "description": (
+                    f"Task '{task}' invoked unexpected "
+                    f"tool '{tool}'."
+                ),
+            })
+
+        # ----------------------------------------------------
+        # Sensitive resource access
+        # ----------------------------------------------------
 
         if check_sensitive_access(event):
 
@@ -73,9 +215,14 @@ def build_evidence(events):
                 "event_id": event_id,
                 "description": (
                     f"Agent performed '{action}' using "
-                    f"'{tool}' against '{target}'."
-                )
+                    f"'{tool}' against sensitive target "
+                    f"'{target}'."
+                ),
             })
+
+        # ----------------------------------------------------
+        # Untrusted source
+        # ----------------------------------------------------
 
         if source in {
             "external_document",
@@ -83,34 +230,68 @@ def build_evidence(events):
             "external_share",
             "webpage",
             "external_url",
-            "unknown"
+            "unknown",
         }:
 
             evidence.append({
                 "type": "UNTRUSTED_SOURCE",
                 "event_id": event_id,
                 "description": (
-                    f"Activity originated from "
-                    f"untrusted source '{source}'."
-                )
+                    f"Agent processed content from "
+                    f"untrusted source '{source}' "
+                    f"before subsequent actions."
+                ),
             })
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # Cross-system movement
+    # --------------------------------------------------------
+
+    if check_cross_system_movement(events):
+
+        evidence.append({
+            "type": "CROSS_SYSTEM_MOVEMENT",
+            "description": (
+                "The agent moved across multiple systems "
+                "during a single task execution."
+            ),
+        })
+
+    # --------------------------------------------------------
     # Untrusted → sensitive transition
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
     if check_untrusted_to_sensitive_transition(events):
 
         evidence.append({
             "type": "UNTRUSTED_TO_SENSITIVE_TRANSITION",
             "description": (
-                "Agent processed untrusted content "
+                "The agent processed untrusted content "
                 "before accessing a sensitive system."
-            )
+            ),
+        })
+
+    # --------------------------------------------------------
+    # Same task, changed behavior
+    # --------------------------------------------------------
+
+    if unexpected_tools:
+
+        evidence.append({
+            "type": "TASK_ACTION_DEVIATION",
+            "description": (
+                f"The task remained '{task}', but the "
+                "agent's tool usage deviated from the "
+                "expected workflow."
+            ),
         })
 
     return evidence
 
+
+# ============================================================
+# ANALYZE EVENTS
+# ============================================================
 
 def analyze_events(events):
 
@@ -121,20 +302,31 @@ def analyze_events(events):
             "task": None,
             "risk_level": "NORMAL",
             "risk_score": 0,
+            "status": "Normal",
             "reasons": [],
+            "reason_codes": [],
             "attack_chain": [],
-            "evidence": []
+            "expected_workflow": [],
+            "observed_workflow": [],
+            "evidence": [],
         }
+
+    # --------------------------------------------------------
+    # Basic task information
+    # --------------------------------------------------------
+
+    agent_id = events[0].get("agent_id")
+    task = events[0].get("task")
+
+    expected_tools = _expected_tools_for_task(task)
+
+    # --------------------------------------------------------
+    # Individual event analysis
+    # --------------------------------------------------------
 
     task_mismatch = False
     unexpected_tool = False
     sensitive_access = False
-
-    reasons = []
-
-    # ------------------------------------------------
-    # Individual event analysis
-    # ------------------------------------------------
 
     for event in events:
 
@@ -147,23 +339,30 @@ def analyze_events(events):
         if check_sensitive_access(event):
             sensitive_access = True
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
     # Sequence analysis
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
-    cross_system_movement = (
-        check_cross_system_movement(events)
-    )
+    cross_system_movement = check_cross_system_movement(events)
 
     untrusted_to_sensitive = (
         check_untrusted_to_sensitive_transition(events)
     )
 
-    task_changed = check_task_change(events)
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # We deliberately do NOT use task_changed here.
+    #
+    # The attacker does not need to change the task.
+    # The suspicious behavior is the deviation in tool usage.
+    # --------------------------------------------------------
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
     # Reasons
-    # ------------------------------------------------
+    # --------------------------------------------------------
+
+    reasons = []
 
     if task_mismatch:
         reasons.append("TASK_MISMATCH")
@@ -178,16 +377,11 @@ def analyze_events(events):
         reasons.append("CROSS_SYSTEM_MOVEMENT")
 
     if untrusted_to_sensitive:
-        reasons.append(
-            "UNTRUSTED_TO_SENSITIVE_TRANSITION"
-        )
+        reasons.append("UNTRUSTED_TO_SENSITIVE_TRANSITION")
 
-    if task_changed:
-        reasons.append("TASK_CHANGED")
-
-    # ------------------------------------------------
+    # --------------------------------------------------------
     # Score
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
     risk_score = calculate_risk_score(
         task_mismatch=task_mismatch,
@@ -195,40 +389,67 @@ def analyze_events(events):
         sensitive_access=sensitive_access,
         cross_system_movement=cross_system_movement,
         untrusted_to_sensitive=untrusted_to_sensitive,
-        task_changed=task_changed
     )
 
     risk_level = get_risk_level(risk_score)
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
     # Attack chain
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
-    attack_chain = []
+    attack_chain = _build_attack_chain(events)
 
-    for event in events:
+    # --------------------------------------------------------
+    # Expected workflow
+    # --------------------------------------------------------
 
-        tool = event.get("tool")
+    # Keep the configured workflow order deterministic.
+    expected_workflow = [
+        _normalize_tool(tool)
+        for tool in EXPECTED_WORKFLOW.get(task, [])
+    ]
 
-        if tool and tool not in attack_chain:
-            attack_chain.append(tool)
+    # --------------------------------------------------------
+    # Observed workflow
+    # --------------------------------------------------------
 
-    # ------------------------------------------------
+    observed_workflow = attack_chain.copy()
+
+    # --------------------------------------------------------
     # Evidence
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
     evidence = build_evidence(events)
 
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # Status
+    # --------------------------------------------------------
+
+    if risk_score > 0:
+        status = "Potentially Suspicious"
+    else:
+        status = "Normal"
+
+    # --------------------------------------------------------
     # Final result
-    # ------------------------------------------------
+    # --------------------------------------------------------
 
     return {
-        "agent_id": events[0].get("agent_id"),
-        "task": events[0].get("task"),
+        "agent_id": agent_id,
+        "task": task,
+
+        "status": status,
+
         "risk_level": risk_level,
         "risk_score": risk_score,
+
         "reasons": reasons,
+        "reason_codes": reasons,
+
+        "expected_workflow": expected_workflow,
+        "observed_workflow": observed_workflow,
+
         "attack_chain": attack_chain,
-        "evidence": evidence
+
+        "evidence": evidence,
     }

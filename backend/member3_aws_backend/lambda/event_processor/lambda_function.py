@@ -5,14 +5,162 @@ import json
 import logging
 import os
 import uuid
-
 from datetime import datetime, timezone
+import boto3
 
 from typing import Any, Dict
 
 
 from detection_service import analyze_sequence
 from dynamodb_service import DynamoDBService
+
+BEDROCK_MODEL_ID = "eu.amazon.nova-lite-v1:0"
+
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name=os.environ.get(
+        "AWS_REGION",
+        "eu-north-1",
+    ),
+)
+
+def generate_bedrock_explanation(
+    detection: Dict[str, Any],
+    events: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Generate a human-readable security explanation using
+    Amazon Bedrock.
+
+    If Bedrock is unavailable or the Lambda execution role
+    does not have permission, detection continues normally.
+    """
+
+    prompt = f"""
+You are a cybersecurity analyst assisting a security
+monitoring system called AgentTrace.
+
+AgentTrace detects potentially suspicious behavior where
+an AI agent may be manipulated into abusing its legitimate
+tools and permissions.
+
+Analyze the following detection evidence.
+
+Detection:
+- Risk level: {detection.get("risk_level")}
+- Risk score: {detection.get("risk_score")}
+- Status: {detection.get("status")}
+- Reason codes: {detection.get("reason_codes", [])}
+- Reasons: {detection.get("reasons", [])}
+- Attack chain: {" -> ".join(detection.get("attack_chain", []))}
+
+Recent agent events:
+{json.dumps(events[-10:], indent=2, default=str)}
+
+Explain the activity for a security analyst.
+
+Return ONLY valid JSON using exactly this structure:
+
+{{
+    "title": "Short incident title",
+    "explanation": "A concise 2-4 sentence explanation of what happened.",
+    "why_suspicious": [
+        "Reason 1",
+        "Reason 2"
+    ],
+    "attack_chain": "tool1 -> tool2 -> tool3",
+    "response": [
+        "Recommended response 1",
+        "Recommended response 2",
+        "Recommended response 3"
+    ]
+}}
+
+Important:
+- Do not invent evidence.
+- Use only the supplied detection and event data.
+- Do not claim that an attack is confirmed.
+- Describe it as potentially suspicious activity.
+"""
+
+    try:
+        response = bedrock.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": prompt,
+                        }
+                    ],
+                }
+            ],
+            inferenceConfig={
+                "maxTokens": 500,
+                "temperature": 0.2,
+            },
+        )
+
+        text = (
+            response["output"]
+            ["message"]
+            ["content"][0]
+            ["text"]
+        ).strip()
+
+        if text.startswith("```json"):
+            text = text[7:]
+
+        if text.startswith("```"):
+            text = text[3:]
+
+        if text.endswith("```"):
+            text = text[:-3]
+
+        text = text.strip()
+
+        explanation = json.loads(text)
+
+        return {
+            "status": "ready",
+            "provider": "Amazon Bedrock",
+            "model": BEDROCK_MODEL_ID,
+            "title": explanation.get(
+                "title",
+                "AI Security Analysis",
+            ),
+            "explanation": explanation.get(
+                "explanation",
+                "",
+            ),
+            "why_suspicious": explanation.get(
+                "why_suspicious",
+                [],
+            ),
+            "attack_chain": explanation.get(
+                "attack_chain",
+                "",
+            ),
+            "response": explanation.get(
+                "response",
+                [],
+            ),
+        }
+
+    except Exception as exc:
+        logger.warning(
+            "Bedrock explanation unavailable: %s",
+            exc,
+        )
+
+        return {
+            "status": "unavailable",
+            "provider": "Amazon Bedrock",
+            "model": BEDROCK_MODEL_ID,
+            "error": str(exc),
+        }
+
 
 
 # ============================================================
@@ -415,58 +563,74 @@ def lambda_handler(
         # ====================================================
 
         incident = None
+        ai_explanation = None
 
         if status == "Potentially Suspicious":
 
             incident = {
+    "incident_id": str(uuid.uuid4()),
 
-                "incident_id":
-                    str(uuid.uuid4()),
+    "agent_id": agent_event["agent_id"],
 
-                "agent_id":
-                    agent_event["agent_id"],
+    "created_at": datetime.now(
+        timezone.utc
+    ).isoformat(),
 
-                "created_at":
-                    datetime.now(
-                        timezone.utc
-                    ).isoformat(),
+    "risk_status": status,
 
-                "risk_status":
-                    status,
+    "risk_level": risk_level,
 
-                "risk_level":
-                    risk_level,
+    "risk_score": risk_score,
 
-                "risk_score":
-                    risk_score,
+    "reason_codes": detection.get(
+        "reason_codes",
+        [],
+    ),
 
-                "reason_codes":
-                    detection.get(
-                        "reason_codes",
-                        [],
-                    ),
+    "reasons": detection.get(
+        "reasons",
+        [],
+    ),
 
-                "reasons":
-                    detection.get(
-                        "reasons",
-                        [],
-                    ),
+    "attack_chain": detection.get(
+        "attack_chain",
+        [],
+    ),
 
-                "attack_chain":
-                    detection.get(
-                        "attack_chain",
-                        [],
-                    ),
+    "expected_workflow": detection.get(
+        "expected_workflow",
+        [],
+    ),
 
-                "event_ids":
-                    detection.get(
-                        "event_ids",
-                        [],
-                    ),
-            }
+    "observed_workflow": detection.get(
+        "observed_workflow",
+        [],
+    ),
+
+    "evidence": detection.get(
+        "evidence",
+        [],
+    ),
+
+    "event_ids": detection.get(
+        "event_ids",
+        [],
+    ),
+}
 
             db.put_incident(
                 incident
+            )
+
+            # Generate an AI security explanation with Amazon Bedrock.
+            ai_explanation = generate_bedrock_explanation(
+                detection,
+                events,
+            )
+
+            logger.info(
+                "Bedrock explanation status: %s",
+                ai_explanation.get("status"),
             )
 
             logger.info(
@@ -495,6 +659,9 @@ def lambda_handler(
 
                 "incident":
                     incident,
+
+                "ai_explanation":
+                    ai_explanation,
             },
         )
 

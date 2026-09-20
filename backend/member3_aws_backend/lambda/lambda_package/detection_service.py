@@ -1,3 +1,20 @@
+# detection_service.py
+
+"""
+AgentTrace AWS Detection Service
+
+Analyzes AI-agent event sequences to detect behavioral deviation
+that may indicate Living-Off-the-Agent (LOTA) activity.
+
+Core principle:
+
+    The legitimate task can remain unchanged.
+
+    Suspicious behavior is detected when the agent begins using
+    unexpected tools, accessing sensitive systems, or moving
+    across systems after processing untrusted content.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -6,14 +23,6 @@ from typing import Any, Dict, List
 # ============================================================
 # EXPECTED AGENT WORKFLOWS
 # ============================================================
-
-EXPECTED_WORKFLOW = {
-    "summarize_email": [
-        "email_tool",
-        "drive_tool",
-    ]
-}
-
 
 EXPECTED_TOOLS = {
     "summarize_email": {
@@ -37,7 +46,12 @@ TOOL_ALIASES = {
 }
 
 
-def normalize_tool(tool: str | None) -> str | None:
+def normalize_tool(tool: Any) -> str | None:
+    """
+    Normalize local simulator and dashboard tool names
+    into one canonical representation.
+    """
+
     if not tool:
         return None
 
@@ -90,10 +104,14 @@ UNTRUSTED_SOURCES = {
 
 
 # ============================================================
-# RULE 1 — TASK / TOOL MISMATCH
+# RULE 1 — TASK / ACTION MISMATCH
 # ============================================================
 
 def check_task_mismatch(event: Dict[str, Any]) -> bool:
+    """
+    Detect an action/tool that is outside the expected workflow
+    for the current task.
+    """
 
     task = event.get("task")
     tool = normalize_tool(event.get("tool"))
@@ -114,6 +132,12 @@ def check_task_mismatch(event: Dict[str, Any]) -> bool:
 # ============================================================
 
 def check_unexpected_tool(event: Dict[str, Any]) -> bool:
+    """
+    Detect unexpected tool usage.
+
+    Kept separate from check_task_mismatch so the detector
+    can expose both concepts independently.
+    """
 
     return check_task_mismatch(event)
 
@@ -123,6 +147,9 @@ def check_unexpected_tool(event: Dict[str, Any]) -> bool:
 # ============================================================
 
 def check_sensitive_access(event: Dict[str, Any]) -> bool:
+    """
+    Detect access to sensitive targets or sensitive tools.
+    """
 
     target = event.get("target")
     tool = normalize_tool(event.get("tool"))
@@ -149,12 +176,17 @@ def check_sensitive_access(event: Dict[str, Any]) -> bool:
 def check_cross_system_movement(
     events: List[Dict[str, Any]]
 ) -> bool:
+    """
+    Detect movement across three or more distinct systems/tools.
+    """
 
     tools = []
 
     for event in events:
 
-        tool = normalize_tool(event.get("tool"))
+        tool = normalize_tool(
+            event.get("tool")
+        )
 
         if tool and tool not in tools:
             tools.append(tool)
@@ -169,13 +201,21 @@ def check_cross_system_movement(
 def check_untrusted_to_sensitive_transition(
     events: List[Dict[str, Any]]
 ) -> bool:
+    """
+    Detect sensitive activity after the agent has processed
+    content from an untrusted source.
+    """
 
     untrusted_seen = False
 
     for event in events:
 
         source = event.get("source")
-        tool = normalize_tool(event.get("tool"))
+
+        tool = normalize_tool(
+            event.get("tool")
+        )
+
         target = event.get("target")
 
         normalized_target = (
@@ -184,15 +224,27 @@ def check_untrusted_to_sensitive_transition(
             else None
         )
 
+        # ----------------------------------------------------
+        # Untrusted content encountered
+        # ----------------------------------------------------
+
         if source in UNTRUSTED_SOURCES:
+
             untrusted_seen = True
+
             continue
 
-        if untrusted_seen and (
-            tool in SENSITIVE_TOOLS
-            or normalized_target in SENSITIVE_TARGETS
-        ):
-            return True
+        # ----------------------------------------------------
+        # Sensitive activity after untrusted content
+        # ----------------------------------------------------
+
+        if untrusted_seen:
+
+            if (
+                tool in SENSITIVE_TOOLS
+                or normalized_target in SENSITIVE_TARGETS
+            ):
+                return True
 
     return False
 
@@ -208,6 +260,23 @@ def calculate_risk_score(
     cross_system_movement: bool = False,
     untrusted_to_sensitive: bool = False,
 ) -> int:
+    """
+    Calculate a prototype behavioral-risk score.
+
+    This is an AgentTrace prototype score, not a
+    standardized cybersecurity severity score.
+
+    Signals:
+
+        Task/action mismatch              +20
+        Unexpected tool                   +20
+        Sensitive resource access         +25
+        Cross-system movement             +20
+        Untrusted → sensitive transition  +25
+
+    Maximum theoretical score = 110.
+    Final score is capped at 100.
+    """
 
     score = 0
 
@@ -260,25 +329,27 @@ def build_evidence(
     if not events:
         return evidence
 
+    # --------------------------------------------------------
+    # Task and workflow
+    # --------------------------------------------------------
+
     task = events[0].get("task")
 
     expected_tools = {
-        normalize_tool(item)
-        for item in EXPECTED_TOOLS.get(task, set())
+        normalize_tool(tool)
+        for tool in EXPECTED_TOOLS.get(task, set())
     }
 
     observed_tools = []
 
     for event in events:
 
-        tool = normalize_tool(event.get("tool"))
+        tool = normalize_tool(
+            event.get("tool")
+        )
 
         if tool and tool not in observed_tools:
             observed_tools.append(tool)
-
-    # --------------------------------------------------------
-    # Expected vs observed workflow
-    # --------------------------------------------------------
 
     unexpected_tools = [
         tool
@@ -286,14 +357,19 @@ def build_evidence(
         if tool not in expected_tools
     ]
 
+    # --------------------------------------------------------
+    # Expected vs observed behavior
+    # --------------------------------------------------------
+
     if unexpected_tools:
 
         evidence.append({
             "type": "BEHAVIOR_DEVIATION",
             "description": (
                 f"Task '{task}' expected tools "
-                f"{sorted(expected_tools)}, but observed "
-                f"unexpected tools: {unexpected_tools}."
+                f"{sorted(expected_tools)}, but the agent "
+                f"also invoked unexpected tools: "
+                f"{unexpected_tools}."
             ),
         })
 
@@ -326,7 +402,7 @@ def build_evidence(
             })
 
         # ----------------------------------------------------
-        # Sensitive resource access
+        # Sensitive resource
         # ----------------------------------------------------
 
         if check_sensitive_access(event):
@@ -352,8 +428,7 @@ def build_evidence(
                 "event_id": event_id,
                 "description": (
                     f"Agent processed content from "
-                    f"untrusted source '{source}' "
-                    f"before subsequent actions."
+                    f"untrusted source '{source}'."
                 ),
             })
 
@@ -372,7 +447,7 @@ def build_evidence(
         })
 
     # --------------------------------------------------------
-    # Untrusted → sensitive transition
+    # Untrusted → sensitive
     # --------------------------------------------------------
 
     if check_untrusted_to_sensitive_transition(events):
@@ -404,12 +479,16 @@ def build_evidence(
 
 
 # ============================================================
-# MAIN DETECTION FUNCTION
+# MAIN AWS DETECTION FUNCTION
 # ============================================================
 
 def analyze_sequence(
     events: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
+
+    # --------------------------------------------------------
+    # Empty sequence
+    # --------------------------------------------------------
 
     if not events:
 
@@ -422,21 +501,21 @@ def analyze_sequence(
             "reasons": [],
             "reason_codes": [],
             "attack_chain": [],
-            "event_ids": [],
             "expected_workflow": [],
             "observed_workflow": [],
+            "event_ids": [],
             "evidence": [],
         }
 
     # --------------------------------------------------------
-    # Basic task information
+    # Basic information
     # --------------------------------------------------------
 
     agent_id = events[0].get("agent_id")
     task = events[0].get("task")
 
     # --------------------------------------------------------
-    # Individual event analysis
+    # Individual signals
     # --------------------------------------------------------
 
     task_mismatch = False
@@ -455,11 +534,11 @@ def analyze_sequence(
             sensitive_access = True
 
     # --------------------------------------------------------
-    # Sequence analysis
+    # Sequence signals
     # --------------------------------------------------------
 
-    cross_system_movement = check_cross_system_movement(
-        events
+    cross_system_movement = (
+        check_cross_system_movement(events)
     )
 
     untrusted_to_sensitive = (
@@ -467,12 +546,12 @@ def analyze_sequence(
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
+    # IMPORTANT
     #
-    # There is deliberately NO task_changed detection.
+    # We intentionally do NOT check task_changed.
     #
-    # In the LOTA scenario, the attacker does not need
-    # to change the agent's legitimate task.
+    # The AgentTrace attack model assumes the legitimate task
+    # remains unchanged while the agent's behavior is manipulated.
     # --------------------------------------------------------
 
     # --------------------------------------------------------
@@ -482,10 +561,14 @@ def analyze_sequence(
     reasons = []
 
     if task_mismatch:
-        reasons.append("TASK_MISMATCH")
+        reasons.append(
+            "TASK_MISMATCH"
+        )
 
     if unexpected_tool:
-        reasons.append("UNEXPECTED_TOOL")
+        reasons.append(
+            "UNEXPECTED_TOOL"
+        )
 
     if sensitive_access:
         reasons.append(
@@ -514,7 +597,9 @@ def analyze_sequence(
         untrusted_to_sensitive=untrusted_to_sensitive,
     )
 
-    risk_level = get_risk_level(risk_score)
+    risk_level = get_risk_level(
+        risk_score
+    )
 
     # --------------------------------------------------------
     # Attack chain
@@ -524,7 +609,7 @@ def analyze_sequence(
 
     for event in events:
 
-        tool = normalize_tool(event.get("tool"))
+        tool = event.get("tool")
 
         if tool and tool not in attack_chain:
             attack_chain.append(tool)
@@ -533,10 +618,12 @@ def analyze_sequence(
     # Expected workflow
     # --------------------------------------------------------
 
-    expected_workflow = [
-        normalize_tool(tool)
-        for tool in EXPECTED_WORKFLOW.get(task, [])
-    ]
+    expected_workflow = list(
+        EXPECTED_TOOLS.get(
+            task,
+            set()
+        )
+    )
 
     # --------------------------------------------------------
     # Observed workflow
@@ -548,10 +635,12 @@ def analyze_sequence(
     # Evidence
     # --------------------------------------------------------
 
-    evidence = build_evidence(events)
+    evidence = build_evidence(
+        events
+    )
 
     # --------------------------------------------------------
-    # Status
+    # Final status
     # --------------------------------------------------------
 
     status = (
@@ -561,22 +650,26 @@ def analyze_sequence(
     )
 
     # --------------------------------------------------------
-    # Final result
+    # Final response
     # --------------------------------------------------------
 
     return {
         "agent_id": agent_id,
+
         "task": task,
 
         "risk_level": risk_level,
+
         "risk_score": risk_score,
 
         "status": status,
 
         "reasons": reasons,
+
         "reason_codes": reasons,
 
         "expected_workflow": expected_workflow,
+
         "observed_workflow": observed_workflow,
 
         "attack_chain": attack_chain,
