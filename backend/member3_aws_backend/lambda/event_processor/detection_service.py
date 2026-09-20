@@ -1,353 +1,487 @@
 from __future__ import annotations
 
-import json
-import os
-import urllib.error
-import urllib.request
-from collections import Counter
 from typing import Any, Dict, List
 
 
-# Normal workflow for the AgentTrace prototype.
-EXPECTED_TOOLS = {"email", "drive"}
+# ============================================================
+# EXPECTED AGENT WORKFLOWS
+# ============================================================
 
-# Tools/resources that may represent sensitive access.
-SENSITIVE_TOOL_KEYWORDS = {
-    "database",
-    "internal_api",
-    "credential",
-    "credentials",
+EXPECTED_TOOLS = {
+    "summarize_email": {
+        "email_tool",
+        "drive_tool",
+        "email",
+        "drive"
+    }
 }
 
-SENSITIVE_TEXT_KEYWORDS = {
-    "credential",
+
+# ============================================================
+# SENSITIVE TARGETS
+# ============================================================
+
+SENSITIVE_TARGETS = {
     "credentials",
-    "secret",
     "secrets",
-    "password",
-    "token",
-    "private-key",
-    "private_key",
-    "api-key",
-    "api_key",
-    "sensitive",
+    "database",
+    "users_table",
+    "private_repository",
+    "org-repos",
+    "internal_api",
+    "internal-service",
+    "internal-repo"
 }
 
 
-def _text(*values: Any) -> str:
-    """Convert multiple values into one lowercase text string."""
-    return " ".join(str(value or "").lower() for value in values)
+# ============================================================
+# SENSITIVE TOOLS
+# ============================================================
+
+SENSITIVE_TOOLS = {
+    "github_tool",
+    "database_tool",
+    "internal_api_tool",
+    "credential_store",
+    "github",
+    "database",
+    "internal_api"
+}
 
 
-def _risk_level(score: int) -> str:
-    """Convert the prototype score into a risk level."""
-    if score >= 80:
-        return "High"
+# ============================================================
+# UNTRUSTED SOURCES
+# ============================================================
 
-    if score >= 60:
-        return "Medium"
+UNTRUSTED_SOURCES = {
+    "external_document",
+    "external_email",
+    "external_share",
+    "webpage",
+    "external_url",
+    "unknown",
+}
 
-    if score >= 30:
-        return "Low"
 
-    return "Normal"
+# ============================================================
+# RULE 1 — TASK MISMATCH
+# ============================================================
 
+def check_task_mismatch(event: Dict[str, Any]) -> bool:
 
-def _is_sensitive(event: Dict[str, Any]) -> bool:
-    """Check whether an event involves a potentially sensitive resource."""
+    task = event.get("task")
+    tool = event.get("tool")
 
-    tool = str(event.get("tool", "")).lower()
-
-    text = _text(
-        event.get("action"),
-        event.get("target"),
-        event.get("source"),
+    expected_tools = EXPECTED_TOOLS.get(
+        task,
+        set()
     )
 
-    if tool in SENSITIVE_TOOL_KEYWORDS:
+    if expected_tools and tool not in expected_tools:
         return True
 
-    return any(
-        keyword in text
-        for keyword in SENSITIVE_TEXT_KEYWORDS
+    return False
+
+
+# ============================================================
+# RULE 2 — UNEXPECTED TOOL
+# ============================================================
+
+def check_unexpected_tool(event: Dict[str, Any]) -> bool:
+
+    task = event.get("task")
+    tool = event.get("tool")
+
+    expected_tools = EXPECTED_TOOLS.get(
+        task,
+        set()
     )
 
+    if expected_tools and tool not in expected_tools:
+        return True
 
-def fallback_analyze_sequence(
+    return False
+
+
+# ============================================================
+# RULE 3 — SENSITIVE RESOURCE ACCESS
+# ============================================================
+
+def check_sensitive_access(event: Dict[str, Any]) -> bool:
+
+    target = event.get("target")
+
+    return target in SENSITIVE_TARGETS
+
+
+# ============================================================
+# RULE 4 — CROSS-SYSTEM MOVEMENT
+# ============================================================
+
+def check_cross_system_movement(
     events: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Local fallback detector.
+) -> bool:
 
-    This allows Member 3's AWS backend to remain independently
-    testable if Member 2's Detection Engine is not deployed yet.
+    tools = []
 
-    The final project Detection Engine is owned by Member 2.
-    """
+    for event in events:
 
-    if not events:
-        return {
-            "risk_level": "Normal",
-            "risk_score": 0,
-            "status": "Normal",
-            "reason_codes": [],
-            "reasons": [],
-            "attack_chain": [],
-            "event_ids": [],
-        }
+        tool = event.get("tool")
 
-    # Make sure events are processed chronologically.
-    ordered = sorted(
-        events,
-        key=lambda event: (
-            event.get("timestamp", ""),
-            event.get("event_id", ""),
-        ),
-    )
+        if tool and tool not in tools:
+            tools.append(tool)
+
+    return len(tools) >= 3
+
+
+# ============================================================
+# RULE 5 — UNTRUSTED → SENSITIVE TRANSITION
+# ============================================================
+
+def check_untrusted_to_sensitive_transition(
+    events: List[Dict[str, Any]]
+) -> bool:
+
+    untrusted_seen = False
+
+    for event in events:
+
+        source = event.get("source")
+        tool = event.get("tool")
+        target = event.get("target")
+
+        if source in UNTRUSTED_SOURCES:
+            untrusted_seen = True
+
+        if untrusted_seen:
+
+            if (
+                tool in SENSITIVE_TOOLS
+                or target in SENSITIVE_TARGETS
+            ):
+                return True
+
+    return False
+
+
+# ============================================================
+# RULE 6 — TASK CHANGE
+# ============================================================
+
+def check_task_change(
+    events: List[Dict[str, Any]]
+) -> bool:
+
+    tasks = []
+
+    for event in events:
+
+        task = event.get("task")
+
+        if task and task not in tasks:
+            tasks.append(task)
+
+    return len(tasks) > 1
+
+
+# ============================================================
+# RISK SCORING
+# ============================================================
+
+def calculate_risk_score(
+    task_mismatch: bool = False,
+    unexpected_tool: bool = False,
+    sensitive_access: bool = False,
+    cross_system_movement: bool = False,
+    untrusted_to_sensitive: bool = False,
+    task_changed: bool = False,
+) -> int:
 
     score = 0
 
-    reason_codes: List[str] = []
-    reasons: List[str] = []
-    attack_chain: List[str] = []
-
-    task = str(
-        ordered[-1].get("task", "")
-    ).lower()
-
-    # ---------------------------------------------------------
-    # RULE 1 — Unexpected tool
-    # ---------------------------------------------------------
-
-    unexpected_events = [
-        event
-        for event in ordered
-        if str(event.get("tool", "")).lower()
-        not in EXPECTED_TOOLS
-    ]
-
-    if unexpected_events:
+    if task_mismatch:
         score += 20
 
-        reason_codes.append(
-            "UNEXPECTED_TOOL"
-        )
+    if unexpected_tool:
+        score += 15
 
-        reasons.append(
-            "The agent used a tool outside the expected "
-            "email/document workflow."
-        )
-
-    # ---------------------------------------------------------
-    # RULE 2 — Sensitive resource
-    # ---------------------------------------------------------
-
-    sensitive_events = [
-        event
-        for event in ordered
-        if _is_sensitive(event)
-    ]
-
-    if sensitive_events:
-        score += 30
-
-        reason_codes.append(
-            "SENSITIVE_RESOURCE"
-        )
-
-        reasons.append(
-            "The sequence includes access to a potentially "
-            "sensitive resource or action."
-        )
-
-    # ---------------------------------------------------------
-    # RULE 3 — Cross-system movement
-    # ---------------------------------------------------------
-
-    tools = [
-        str(event.get("tool", "")).lower()
-        for event in ordered
-    ]
-
-    unique_tools = set(tools)
-
-    if len(unique_tools) >= 3:
+    if sensitive_access:
         score += 20
 
-        reason_codes.append(
-            "CROSS_SYSTEM_MOVEMENT"
-        )
+    if cross_system_movement:
+        score += 15
 
-        reasons.append(
-            "The agent moved across multiple systems/tools "
-            "in one task sequence."
-        )
-
-    # ---------------------------------------------------------
-    # RULE 4 — Task/action mismatch
-    # ---------------------------------------------------------
-
-    if task == "summarize_email" and unexpected_events:
-
-        score += 30
-
-        reason_codes.append(
-            "TASK_ACTION_MISMATCH"
-        )
-
-        reasons.append(
-            "Observed actions do not match the intended "
-            "email-summary task."
-        )
-
-    # ---------------------------------------------------------
-    # RULE 5 — Repeated unusual behaviour
-    # ---------------------------------------------------------
-
-    tool_counts = Counter(tools)
-
-    unusual_count = len(unexpected_events)
-
-    repeated_unusual = (
-        unusual_count >= 2
-        or any(
-            count >= 2
-            for tool, count in tool_counts.items()
-            if tool not in EXPECTED_TOOLS
-        )
-    )
-
-    if repeated_unusual:
-
+    if untrusted_to_sensitive:
         score += 20
 
-        reason_codes.append(
-            "REPEATED_UNUSUAL_BEHAVIOR"
-        )
+    if task_changed:
+        score += 25
 
-        reasons.append(
-            "Multiple unusual actions occurred in "
-            "the same sequence."
-        )
+    return min(score, 100)
 
-    # Maximum prototype score = 100.
-    score = min(score, 100)
 
-    # ---------------------------------------------------------
-    # ATTACK CHAIN
-    # ---------------------------------------------------------
+# ============================================================
+# RISK LEVEL
+# ============================================================
 
-    for event in ordered:
+def get_risk_level(score: int) -> str:
 
-        tool = str(
-            event.get("tool", "")
-        )
+    if score >= 80:
+        return "HIGH"
 
-        target = str(
-            event.get("target", "")
-        )
+    elif score >= 60:
+        return "MEDIUM"
 
-        if target:
-            attack_chain.append(
-                f"{tool}:{target}"
+    elif score >= 30:
+        return "LOW"
+
+    return "NORMAL"
+
+
+# ============================================================
+# EVIDENCE
+# ============================================================
+
+def build_evidence(
+    events: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+
+    evidence = []
+
+    # --------------------------------------------------------
+    # Task change evidence
+    # --------------------------------------------------------
+
+    tasks = []
+
+    for event in events:
+
+        task = event.get("task")
+
+        if task and task not in tasks:
+            tasks.append(task)
+
+    if len(tasks) > 1:
+
+        evidence.append({
+            "type": "TASK_CHANGE",
+            "description": (
+                f"Agent task changed from "
+                f"'{tasks[0]}' to '{tasks[-1]}'."
             )
-        else:
-            attack_chain.append(tool)
+        })
 
-    return {
-        "risk_level": _risk_level(score),
+    # --------------------------------------------------------
+    # Individual event evidence
+    # --------------------------------------------------------
 
-        "risk_score": score,
+    for event in events:
 
-        # We deliberately don't call it a confirmed attack.
-        "status": (
-            "Potentially Suspicious"
-            if reason_codes
-            else "Normal"
-        ),
+        event_id = event.get("event_id")
+        task = event.get("task")
+        tool = event.get("tool")
+        action = event.get("action")
+        target = event.get("target")
+        source = event.get("source")
 
-        "reason_codes": reason_codes,
+        if check_task_mismatch(event):
 
-        "reasons": reasons,
+            evidence.append({
+                "type": "TASK_MISMATCH",
+                "event_id": event_id,
+                "description": (
+                    f"Task '{task}' used unexpected "
+                    f"tool '{tool}'."
+                )
+            })
 
-        "attack_chain": attack_chain,
+        if check_sensitive_access(event):
 
-        "event_ids": [
-            event.get("event_id")
-            for event in ordered
-        ],
-    }
+            evidence.append({
+                "type": "SENSITIVE_RESOURCE_ACCESS",
+                "event_id": event_id,
+                "description": (
+                    f"Agent performed '{action}' using "
+                    f"'{tool}' against '{target}'."
+                )
+            })
 
+        if source in UNTRUSTED_SOURCES:
+
+            evidence.append({
+                "type": "UNTRUSTED_SOURCE",
+                "event_id": event_id,
+                "description": (
+                    f"Activity originated from "
+                    f"untrusted source '{source}'."
+                )
+            })
+
+    # --------------------------------------------------------
+    # Untrusted → sensitive transition evidence
+    # --------------------------------------------------------
+
+    if check_untrusted_to_sensitive_transition(events):
+
+        evidence.append({
+            "type": "UNTRUSTED_TO_SENSITIVE_TRANSITION",
+            "description": (
+                "Agent processed untrusted content "
+                "before accessing a sensitive system."
+            )
+        })
+
+    return evidence
+
+
+# ============================================================
+# MAIN DETECTION FUNCTION
+# ============================================================
 
 def analyze_sequence(
     events: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """
-    Analyze an event sequence.
 
-    If Member 2's Detection Engine URL is configured,
-    use it.
+    if not events:
 
-    Otherwise use the local fallback detector.
-
-    This makes Member 3 independently testable.
-    """
-
-    detection_engine_url = os.getenv(
-        "DETECTION_ENGINE_URL",
-        ""
-    ).strip()
-
-    # ---------------------------------------------------------
-    # If Member 2's detector isn't available,
-    # use our local fallback.
-    # ---------------------------------------------------------
-
-    if not detection_engine_url:
-        return fallback_analyze_sequence(events)
-
-    payload = json.dumps(
-        {
-            "events": events
+        return {
+            "agent_id": None,
+            "task": None,
+            "risk_level": "NORMAL",
+            "risk_score": 0,
+            "status": "Normal",
+            "reasons": [],
+            "reason_codes": [],
+            "attack_chain": [],
+            "event_ids": [],
+            "evidence": [],
         }
-    ).encode("utf-8")
 
-    request = urllib.request.Request(
-        detection_engine_url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json"
-        },
-        method="POST",
+    task_mismatch = False
+    unexpected_tool = False
+    sensitive_access = False
+
+    reasons = []
+
+    # --------------------------------------------------------
+    # Individual event analysis
+    # --------------------------------------------------------
+
+    for event in events:
+
+        if check_task_mismatch(event):
+            task_mismatch = True
+
+        if check_unexpected_tool(event):
+            unexpected_tool = True
+
+        if check_sensitive_access(event):
+            sensitive_access = True
+
+    # --------------------------------------------------------
+    # Sequence analysis
+    # --------------------------------------------------------
+
+    cross_system_movement = (
+        check_cross_system_movement(events)
     )
 
-    try:
+    untrusted_to_sensitive = (
+        check_untrusted_to_sensitive_transition(events)
+    )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=5,
-        ) as response:
+    task_changed = check_task_change(events)
 
-            result = json.loads(
-                response.read().decode("utf-8")
-            )
+    # --------------------------------------------------------
+    # Reason codes
+    # --------------------------------------------------------
 
-            if not isinstance(result, dict):
-                raise ValueError(
-                    "Detection engine returned "
-                    "an invalid response."
-                )
+    if task_mismatch:
+        reasons.append("TASK_MISMATCH")
 
-            return result
+    if unexpected_tool:
+        reasons.append("UNEXPECTED_TOOL")
 
-    except (
-        urllib.error.URLError,
-        urllib.error.HTTPError,
-        TimeoutError,
-        ValueError,
-        json.JSONDecodeError,
-    ):
+    if sensitive_access:
+        reasons.append("SENSITIVE_RESOURCE_ACCESS")
 
-        # If Member 2's service is temporarily unavailable,
-        # keep our backend operational.
-        return fallback_analyze_sequence(events)
+    if cross_system_movement:
+        reasons.append("CROSS_SYSTEM_MOVEMENT")
+
+    if untrusted_to_sensitive:
+
+        reasons.append(
+            "UNTRUSTED_TO_SENSITIVE_TRANSITION"
+        )
+
+    if task_changed:
+        reasons.append("TASK_CHANGED")
+
+    # --------------------------------------------------------
+    # Risk score
+    # --------------------------------------------------------
+
+    risk_score = calculate_risk_score(
+        task_mismatch=task_mismatch,
+        unexpected_tool=unexpected_tool,
+        sensitive_access=sensitive_access,
+        cross_system_movement=cross_system_movement,
+        untrusted_to_sensitive=untrusted_to_sensitive,
+        task_changed=task_changed,
+    )
+
+    risk_level = get_risk_level(
+        risk_score
+    )
+
+    # --------------------------------------------------------
+    # Attack chain
+    # --------------------------------------------------------
+
+    attack_chain = []
+
+    for event in events:
+
+        tool = event.get("tool")
+
+        if tool and tool not in attack_chain:
+
+            attack_chain.append(tool)
+
+    # --------------------------------------------------------
+    # Evidence
+    # --------------------------------------------------------
+
+    evidence = build_evidence(
+        events
+    )
+
+    # --------------------------------------------------------
+    # Final status
+    # --------------------------------------------------------
+
+    status = (
+        "Potentially Suspicious"
+        if reasons
+        else "Normal"
+    )
+
+    # --------------------------------------------------------
+    # Final result
+    # --------------------------------------------------------
+
+    return {
+        "agent_id": events[0].get("agent_id"),
+        "task": events[0].get("task"),
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "status": status,
+        "reasons": reasons,
+        "reason_codes": reasons,
+        "attack_chain": attack_chain,
+        "event_ids": [
+            event.get("event_id")
+            for event in events
+        ],
+        "evidence": evidence,
+    }

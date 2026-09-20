@@ -8,7 +8,7 @@ except ImportError:
 
 MODE = os.getenv("AGENT_LOG_MODE", "http")
 
-DETECTION_ENGINE_URL = "http://10.170.174.73:8000/event"
+DETECTION_ENGINE_URL = "https://9gf9r8x4n5.execute-api.eu-north-1.amazonaws.com/dev/events"
 LOG_FILE_PATH = os.getenv("AGENT_LOG_FILE", "events.jsonl")
 
 FALLBACK_TO_FILE_ON_HTTP_FAILURE = True
